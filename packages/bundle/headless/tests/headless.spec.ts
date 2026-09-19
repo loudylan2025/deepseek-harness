@@ -1,5 +1,6 @@
 /** Direct one-shot Agent driving, durable aggregation, flushing, and exit mapping. */
 
+import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
@@ -17,6 +18,7 @@ afterEach(() => { Object.assign(internals, originalInternals) })
 
 interface Script {
   before?(session: Session): void
+  mount?(agentCtx: Context): Promise<void> | void
   afterPrompt(session: Session, message: UserMessage, agent: Agent): Promise<void> | void
 }
 
@@ -87,6 +89,7 @@ async function bench(script: Script): Promise<{
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentDefaultModelConfig, { provider: 'test-provider', model: 'test-model' })
+  ctx.provide('agentPresets', { mount: async (agentCtx: Context) => { await script.mount?.(agentCtx) } } as never)
   ctx.agents.setFactory({
     async createAgent(ownerCtx: Context, options: CreateAgentOptions): Promise<AgentHandle> {
       const session = ctx.sessions.create(options.sessionId, {
@@ -136,6 +139,13 @@ async function bench(script: Script): Promise<{
 }
 
 describe('headless runner', () => {
+  it('declares one preset roster and one model-selection settings Host row', () => {
+    const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+    expect((patch.match(/id: agent-presets/g) ?? [])).toHaveLength(1)
+    expect((patch.match(/id: subagent-model-selection-settings/g) ?? [])).toHaveLength(1)
+    expect(patch).not.toMatch(/id: tool-subagent\n[\s\S]*modelSelectionSettings: true/)
+  })
+
   it('aggregates the final text across the complete idle-to-idle interval and flushes before exit', async () => {
     const test = await bench({
       before(session) {
@@ -375,6 +385,31 @@ describe('headless runner', () => {
     await test.ctx.fiber.dispose()
   })
 
+  it('mounts the default preset during setup before Agent publication', async () => {
+    const order: string[] = []
+    const test = await bench({
+      mount: () => { order.push('mount') },
+      before: () => { order.push('register') },
+      afterPrompt(session, message) { appendTurn(session, 1, message, 'composed', true) },
+    })
+    expect(await test.run()).toMatchObject({ code: 0, out: 'composed\n' })
+    expect(order).toEqual(['mount', 'register'])
+    await test.ctx.fiber.dispose()
+  })
+
+  it('fails closed when the default preset cannot mount', async () => {
+    let registered = false
+    const test = await bench({
+      mount: () => { throw new Error('preset mount failed') },
+      before: () => { registered = true },
+      afterPrompt() { throw new Error('must not run') },
+    })
+    const result = await test.run()
+    expect(result).toMatchObject({ code: 1, err: 'dsh: preset mount failed\n' })
+    expect(registered).toBe(false)
+    await test.ctx.fiber.dispose()
+  })
+
   it('reports a direct Agent creation failure', async () => {
     const ctx = new Context()
     let err = ''
@@ -385,6 +420,7 @@ describe('headless runner', () => {
     })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) } as never)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
+    ctx.provide('agentPresets', { mount: () => Promise.resolve() } as never)
     ctx.provide('agents', { create: () => Promise.reject(new Error('factory exploded')) } as never)
     apply(ctx, { task: 't' })
     expect(await exited).toBe(1)
@@ -402,6 +438,7 @@ describe('headless runner', () => {
     })
     ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'p', model: 'm' }) } as never)
     ctx.provide('sessions', { flush: () => Promise.resolve(true) } as never)
+    ctx.provide('agentPresets', { mount: () => Promise.resolve() } as never)
     const rejected = {
       then(_resolve: (value: never) => void, reject: (reason: unknown) => void): void {
         reject('factory exploded')

@@ -28,7 +28,7 @@ import type {} from '@deepseek-ai/dsh-cmdline'
 export const name = 'headless-runner'
 
 /** Core services required before the one-shot turn can start. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions']
+export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'sessions']
 
 /** Plugin config: the task resolved from this app's injected provider service. */
 export interface Config {
@@ -41,6 +41,10 @@ export const Config: z<Config> = z.object({
 })
 
 /** Outcome of one owned run interval. */
+interface AgentPresetRoster {
+  mount(agentCtx: Context): Promise<unknown>
+}
+
 interface RunOutcome {
   text: string
   reason: SessionEvent<'turn/end'>['data']['reason'] | undefined
@@ -171,23 +175,21 @@ async function run(ctx: Context, task: string, io: HeadlessIo): Promise<void> {
   // creating an Agent so its scoped tools and adapters are not half-composed.
   await ctx.get('loader')?.await()
   const agents = ctx.get('agents')
+  const agentPresets = ctx.get('agentPresets') as AgentPresetRoster | undefined
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   // Early process shutdown can dispose the tree while settlement is pending.
-  if (agents === undefined || defaultModel === undefined || sessions === undefined) return
+  if (agents === undefined || agentPresets === undefined || defaultModel === undefined || sessions === undefined) return
 
   const selection = defaultModel.currentSelection()
-  // This bundle composes no preset roster, so the model-facing rows sit in the
-  // host plane and the agent reads them from the global layer. A deployment
-  // that DOES configure one has to join it here first
-  // (@deepseek-ai/dsh-agent-presets README, "Composing a child agent").
   const { agent } = await agents.create({
     sessionId: brandString<SessionId>(`session-${randomUUID()}`),
     meta: { cwd: process.cwd() },
     agentOptions: { provider: selection.provider, model: selection.model },
-    setup: (agentCtx) => {
+    setup: async (agentCtx) => {
       const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       installModelSelection(agentCtx, selected)
+      await agentPresets.mount(agentCtx)
     },
   })
   await agent.whenIdle()

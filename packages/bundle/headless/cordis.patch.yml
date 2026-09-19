@@ -16,6 +16,16 @@
     mode: !!js process.env.DSH_TOOLS_MODE
 
 - insert:
+    # The roster and model-selection settings are Host services used by the
+    # shipped standard preset when each headless root Agent is composed.
+    - id: subagent-model-selection-settings
+      name: '@deepseek-ai/dsh-tool-subagent/model-selection-settings'
+
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
     # PTC mode is a core execution capability, not a Web component.
     - id: code-runtime
       name: '@deepseek-ai/dsh-code-runtime-worker-thread'
