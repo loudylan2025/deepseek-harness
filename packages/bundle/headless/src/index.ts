@@ -36,7 +36,7 @@ import { projectJsonRun, boundJsonLine } from './json-stream.ts'
 export const name = 'headless-runner'
 
 /** Core services required before the one-shot turn can start. */
-export const inject = ['agentDefaultModel', 'agents', 'sessions']
+export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'sessions']
 
 /** Plugin config: the task and run options resolved from this app's injected provider service. */
 export interface Config {
@@ -53,6 +53,11 @@ export const Config: z<Config> = z.object({
   sessionId: z.string(),
   json: z.boolean(),
 })
+
+/** Minimal roster service used to compose the root Agent before publication. */
+interface AgentPresetRoster {
+  mount(agentCtx: Context): Promise<unknown>
+}
 
 /** Outcome of one owned run interval. */
 interface RunOutcome {
@@ -311,10 +316,11 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
   // creating an Agent so its scoped tools and adapters are not half-composed.
   await ctx.get('loader')?.await()
   const agents = ctx.get('agents')
+  const agentPresets = ctx.get('agentPresets') as AgentPresetRoster | undefined
   const defaultModel = ctx.get('agentDefaultModel')
   const sessions = ctx.get('sessions')
   // Early process shutdown can dispose the tree while settlement is pending.
-  if (agents === undefined || defaultModel === undefined || sessions === undefined) return
+  if (agents === undefined || agentPresets === undefined || defaultModel === undefined || sessions === undefined) return
 
   // A Cordis overlay sets the row directly and bypasses the CLI trim check, so
   // the same public setting must fail here rather than become a blank identity.
@@ -331,13 +337,10 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
 
   const selection = defaultModel.currentSelection()
   const agentOptions = { provider: selection.provider, model: selection.model }
-  // This bundle composes no preset roster, so the model-facing rows sit in the
-  // host plane and the agent reads them from the global layer. A deployment
-  // that DOES configure one has to join it here first
-  // (@deepseek-ai/dsh-agent-presets README, "Composing a child agent").
-  const setup = (agentCtx: Context): void => {
+  const setup = async (agentCtx: Context): Promise<void> => {
     const selected: ModelSelectionRef = { current: selection, assembled: undefined }
     installModelSelection(agentCtx, selected)
+    await agentPresets.mount(agentCtx)
   }
   const sessionId = brandString<SessionId>(config.sessionId ?? `session-${randomUUID()}`)
   const fs = ctx.get('fs')
