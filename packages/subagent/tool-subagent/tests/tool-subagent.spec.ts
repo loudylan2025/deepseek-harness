@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import { ToolCallId, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, ReasoningEffortId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import { assembleContextFor, type Agent } from '@deepseek-ai/dsh-agent'
@@ -89,6 +89,68 @@ describe('dsh-tool-subagent', () => {
     expect(text(result)).toBe('child says hi')
   })
 
+  it('binds the exact parent fact-pack body and ignores the authored prompt', async () => {
+    const prompts: string[] = []
+    const ctx = await setup({ provider: 'mock', enableRunInBackground: false }, {
+      onStart: (request) => {
+        const block = request.prompt[0]
+        if (block?.type === 'text') prompts.push(block.text)
+      },
+    })
+    const parent = fakeAgent('fact-pack-parent')
+    parent.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'preamble\nBEGIN_EXACT_FACT_PACK\r\n  keep  \nline\n\r\nEND_EXACT_FACT_PACK\nignored' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const first = await callSubagent(ctx, {
+      description: 'first', prompt: 'model-authored-one', use_parent_exact_fact_pack: true,
+    }, { agent: parent })
+    const second = await callSubagent(ctx, {
+      description: 'second', prompt: 'model-authored-two', use_parent_exact_fact_pack: true,
+    }, { agent: parent })
+    expect(first.isError).toBe(false)
+    expect(second.isError).toBe(false)
+    expect(prompts).toEqual(['  keep  \nline\n', '  keep  \nline\n'])
+  })
+
+  it.each([
+    'BEGIN_EXACT_FACT_PACK\ncontent',
+    'BEGIN_EXACT_FACT_PACK\ncontent\nEND_EXACT_FACT_PACK\nEND_EXACT_FACT_PACK',
+    'END_EXACT_FACT_PACK\ncontent\nBEGIN_EXACT_FACT_PACK',
+    'BEGIN_EXACT_FACT_PACK\ncontent',
+  ])('fails closed for malformed fact-pack markers: %s', async (task) => {
+    let starts = 0
+    const ctx = await setup({ provider: 'mock', enableRunInBackground: false }, {
+      onStart: () => { starts++ },
+    })
+    const parent = fakeAgent('malformed-fact-pack')
+    parent.session.append('user/message', createUserMessage({ content: [{ type: 'text', text: task }], source: { kind: 'user' } }), { surfaceOp: 'append' })
+    const result = await callSubagent(ctx, {
+      description: 'reject', prompt: 'ignored', use_parent_exact_fact_pack: true,
+    }, { agent: parent })
+    expect(result.isError).toBe(true)
+    expect(starts).toBe(0)
+  })
+
+  it('keeps the old prompt path without reading the parent Session when binding is omitted or false', async () => {
+    const prompts: string[] = []
+    const ctx = await setup({ provider: 'mock', enableRunInBackground: false }, {
+      onStart: (request) => {
+        const block = request.prompt[0]
+        if (block?.type === 'text') prompts.push(block.text)
+      },
+    })
+    const parent = fakeAgent('prompt-path-parent')
+    const snapshot = parent.session.snapshotEvents.bind(parent.session)
+    parent.session.snapshotEvents = () => { throw new Error('unexpected Session read') }
+    const omitted = await callSubagent(ctx, { description: 'old', prompt: 'exact old prompt' }, { agent: parent })
+    const falseFlag = await callSubagent(ctx, { description: 'old', prompt: 'exact false prompt', use_parent_exact_fact_pack: false }, { agent: parent })
+    expect(omitted.isError).toBe(false)
+    expect(falseFlag.isError).toBe(false)
+    expect(prompts).toEqual(['exact old prompt', 'exact false prompt'])
+    parent.session.snapshotEvents = snapshot
+  })
+
   it('omits run_in_background entirely when the instance disables it (schema and capability never disagree)', async () => {
     const ctx = await setup({ provider: 'mock', enableRunInBackground: false })
     const schema = ctx.tools.schemas().find(s => s.name === 'subagent')
@@ -96,6 +158,7 @@ describe('dsh-tool-subagent', () => {
     expect(Object.keys(props).sort()).toEqual([
       'description',
       'prompt',
+      'use_parent_exact_fact_pack',
     ])
     expect(schema!.description).not.toContain('job_output')
   })

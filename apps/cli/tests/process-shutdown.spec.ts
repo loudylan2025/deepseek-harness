@@ -58,6 +58,25 @@ describe('process shutdown', () => {
     }
   })
 
+  it('keeps the force-exit bound armed after successful disposal without replacing natural completion', async () => {
+    vi.useFakeTimers()
+    const exit = vi.fn()
+    const complete = vi.fn()
+    const shutdown = createProcessShutdown(() => Promise.resolve(), exit, complete)
+
+    await shutdown.shutdown(7)
+
+    expect(complete).toHaveBeenCalledOnce()
+    expect(complete).toHaveBeenCalledWith(7)
+    expect(exit).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(PROCESS_SHUTDOWN_TIMEOUT_MS - 1)
+    expect(exit).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(exit).toHaveBeenCalledOnce()
+    expect(exit).toHaveBeenCalledWith(7)
+  })
+
   it('forces exit when graceful disposal reaches its bound', async () => {
     vi.useFakeTimers()
     const disposal = deferred()

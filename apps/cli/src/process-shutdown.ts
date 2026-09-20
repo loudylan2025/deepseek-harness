@@ -45,7 +45,11 @@ export function createProcessShutdown(
   const completeOnce = (code: number): void => {
     if (completed || forceExited) return
     completed = true
-    clearExitTimeout()
+    // Successful tree disposal does not prove process quiescence: provider-owned
+    // keep-alive sockets or other non-tree handles can still keep Node alive.
+    // Preserve the existing total shutdown bound as a force-exit fallback, but
+    // unref it so a genuinely quiescent process still exits naturally at once.
+    timeout?.unref()
     complete(code)
   }
 
