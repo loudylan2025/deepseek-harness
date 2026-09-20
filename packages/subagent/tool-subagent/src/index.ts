@@ -140,6 +140,57 @@ function outputValueText(values: JsonValue[]): string {
     .join('')
 }
 
+/**
+ * Extract the exact fact-pack body from the parent's initial real user task.
+ * This is intentionally the one line-scoped exception to the Session snapshot
+ * reader deprecation: no projection or paged reader exposes that initial prompt.
+ */
+function exactFactPackPrompt(session: Session): string {
+  // oxlint-disable-next-line typescript/no-deprecated -- No projection or paged reader exposes the parent initial user prompt.
+  const initial = session.snapshotEvents().find(event =>
+    event.type === 'user/message' && event.data.source.kind === 'user')
+  if (initial === undefined || initial.type !== 'user/message') {
+    throw new Error('subagent tool: parent Session has no initial real user task')
+  }
+  const textBlocks = initial.data.content.filter((block): block is { type: 'text'; text: string } =>
+    block.type === 'text' && typeof block.text === 'string')
+  if (textBlocks.length !== initial.data.content.length) {
+    throw new Error('subagent tool: parent initial real user task is not plain text')
+  }
+  const source = textBlocks.map(block => block.text).join('')
+  const lines: Array<{ content: string; start: number; end: number; ending: string }> = []
+  let cursor = 0
+  while (cursor <= source.length) {
+    const newline = source.indexOf('\n', cursor)
+    const end = newline === -1 ? source.length : newline
+    const hasCr = end > cursor && source[end - 1] === '\r'
+    lines.push({
+      content: source.slice(cursor, hasCr ? end - 1 : end),
+      start: cursor,
+      end: newline === -1 ? end : newline + 1,
+      ending: newline === -1 ? '' : hasCr ? '\r\n' : '\n',
+    })
+    if (newline === -1) break
+    cursor = newline + 1
+  }
+  const begins = lines.filter(line => line.content === 'BEGIN_EXACT_FACT_PACK')
+  const ends = lines.filter(line => line.content === 'END_EXACT_FACT_PACK')
+  if (begins.length !== 1 || ends.length !== 1) {
+    throw new Error('subagent tool: malformed exact fact-pack markers')
+  }
+  const begin = begins[0]
+  const end = ends[0]
+  if (begin === undefined || end === undefined || begin.end > end.start || begin.ending === '') {
+    throw new Error('subagent tool: malformed exact fact-pack markers')
+  }
+  const beforeEnd = source.slice(begin.end, end.start)
+  const structuralEnding = beforeEnd.endsWith('\r\n') ? '\r\n' : beforeEnd.endsWith('\n') ? '\n' : undefined
+  if (structuralEnding === undefined) {
+    throw new Error('subagent tool: exact fact-pack END marker lacks a structural newline')
+  }
+  return beforeEnd.slice(0, -structuralEnding.length)
+}
+
 /** Settle pending startup without rejecting the task producer contract. */
 async function settleStart(start: Promise<SubagentRun>, signal: AbortSignal): Promise<JobOutcome> {
   try {
@@ -398,6 +449,10 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             required: true,
             description: wording.promptDescription,
           },
+          use_parent_exact_fact_pack: {
+            type: 'boolean' as const,
+            description: 'Use the exact fact-pack body from the parent\'s initial real user task instead of prompt.',
+          },
           ...modelSelectionEnabled ? {
             provider: {
               type: 'string' as const,
@@ -515,7 +570,12 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           const maxDepth = runtimeCtx.subagents.resolveMaxDepth(config.maxDepth)
           const request = {
             label: args.description,
-            prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
+            prompt: [{
+              type: 'text',
+              text: args.use_parent_exact_fact_pack === true
+                ? exactFactPackPrompt(parent.session)
+                : args.prompt,
+            }] as ContentBlock[],
             parent,
             ...requestedChildAgentOptions !== undefined ? { agentOptions: requestedChildAgentOptions } : {},
             ...config.persona !== undefined ? { persona: config.persona } : {},
